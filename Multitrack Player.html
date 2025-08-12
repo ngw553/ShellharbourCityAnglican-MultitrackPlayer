@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Multitrack Player</title>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; margin: 20px; color:#111 }
+  h1 { margin:0 0 12px 0; font-size:20px }
+  .controls { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap }
+  button { padding:8px 12px; border-radius:6px; border:1px solid #ddd; background:#fafafa; cursor:pointer }
+  input[type="range"] { width:160px }
+  .track { display:flex; gap:10px; align-items:center; padding:8px; border-radius:8px; border:1px solid #eee; margin-bottom:8px }
+  .track-name { min-width:120px; font-weight:600 }
+  .file-drop { margin:12px 0; padding:12px; border:2px dashed #ccc; text-align:center; border-radius:8px }
+  .playhead { width:100%; margin:8px 0 }
+  .time { width:120px; text-align:right; font-family:monospace }
+  small { color:#666 }
+</style>
+</head>
+<body>
+<h1>Multitrack Player</h1>
+<div class="controls">
+  <input id="fileInput" type="file" accept=".wav,audio/wav,audio/*" multiple />
+  <div style="display:flex;gap:8px;align-items:center">
+    <button id="playBtn">Play</button>
+    <button id="pauseBtn">Pause</button>
+    <button id="stopBtn">Stop</button>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px">
+    <label><small>Master</small> <input id="masterVol" type="range" min="0" max="1" step="0.01" value="1"></label>
+  </div>
+  <div style="margin-left:auto" class="time" id="timeDisplay">00:00 / 00:00</div>
+</div>
+
+<div class="file-drop" id="dropZone">Drag & drop stems here (or use file chooser)</div>
+
+<input type="range" id="seek" class="playhead" min="0" max="1" step="0.001" value="0">
+
+<div id="tracks"></div>
+
+<script>
+(async function(){
+  // Basic Web Audio multitrack player
+  const AudioContext = window.AudioContext || window.webkitAudioContext;
+  const audioCtx = new AudioContext();
+
+  let tracks = []; // { name, buffer, gainNode, source (live), element, file }
+  let masterGain = audioCtx.createGain();
+  masterGain.gain.value = 1;
+  masterGain.connect(audioCtx.destination);
+
+  let isPlaying = false;
+  let playStartedAt = 0;      // audioCtx.currentTime when playback started
+  let pausedAt = 0;           // seconds offsets when paused
+  let duration = 0;
+  let raf = null;
+
+  const fileInput = document.getElementById('fileInput');
+  const dropZone = document.getElementById('dropZone');
+  const tracksDiv = document.getElementById('tracks');
+  const playBtn = document.getElementById('playBtn');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const seek = document.getElementById('seek');
+  const timeDisplay = document.getElementById('timeDisplay');
+  const masterVol = document.getElementById('masterVol');
+
+  masterVol.addEventListener('input', ()=> masterGain.gain.value = parseFloat(masterVol.value));
+
+  fileInput.addEventListener('change', e => handleFiles(e.target.files));
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.style.borderColor='#999'; });
+  dropZone.addEventListener('dragleave', e => { dropZone.style.borderColor='#ccc'; });
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.style.borderColor='#ccc';
+    handleFiles(e.dataTransfer.files);
+  });
+
+  function formatTime(s){
+    if (!isFinite(s) || s<=0) return '00:00';
+    const m = Math.floor(s/60);
+    const ss = Math.floor(s%60).toString().padStart(2,'0');
+    return `${m}:${ss}`;
+  }
+
+  function renderTracks(){
+    tracksDiv.innerHTML = '';
+    tracks.forEach((t, idx) => {
+      const div = document.createElement('div');
+      div.className = 'track';
+      div.innerHTML = `
+        <div class="track-name">${escapeHtml(t.name)}</div>
+        <label>Vol <input type="range" min="0" max="1" step="0.01" value="${t.volume||1}" data-idx="${idx}" class="vol"></label>
+        <label>Mute <input type="checkbox" data-idx="${idx}" class="mute"${t.mute? ' checked':''}></label>
+        <label>Solo <input type="checkbox" data-idx="${idx}" class="solo"${t.solo? ' checked':''}></label>
+        <div style="margin-left:auto"><small>${formatTime(t.buffer ? t.buffer.duration : 0)}</small></div>
+      `;
+      tracksDiv.appendChild(div);
+      t.element = div;
+    });
+    // attach events
+    tracksDiv.querySelectorAll('.vol').forEach(el => el.addEventListener('input', e=>{
+      const i = +e.target.dataset.idx;
+      tracks[i].volume = parseFloat(e.target.value);
+      updateGains();
+    }));
+    tracksDiv.querySelectorAll('.mute').forEach(el => el.addEventListener('change', e=>{
+      const i = +e.target.dataset.idx;
+      tracks[i].mute = e.target.checked;
+      updateGains();
+    }));
+    tracksDiv.querySelectorAll('.solo').forEach(el => el.addEventListener('change', e=>{
+      const i = +e.target.dataset.idx;
+      tracks[i].solo = e.target.checked;
+      updateGains();
+    }));
+  }
+
+  function updateGains(){
+    const anySolo = tracks.some(t => t.solo);
+    tracks.forEach(t => {
+      const g = t.gainNode;
+      if (!g) return;
+      if (anySolo) {
+        g.gain.value = (t.solo ? t.volume || 1 : 0) * (t.mute ? 0 : 1);
+      } else {
+        g.gain.value = (t.volume || 1) * (t.mute ? 0 : 1);
+      }
+    });
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+  }
+
+  async function handleFiles(fileList){
+    const files = Array.from(fileList).filter(f => f.type.startsWith('audio') || /\.wav$/i.test(f.name));
+    if (files.length === 0) return alert('No audio files found.');
+    // load each file
+    for (const f of files) {
+      const arr = await f.arrayBuffer();
+      try {
+        const buffer = await audioCtx.decodeAudioData(arr);
+        const track = {
+          name: f.name,
+          buffer,
+          file: f,
+          gainNode: audioCtx.createGain(),
+          volume: 1,
+          mute: false,
+          solo: false
+        };
+        track.gainNode.connect(masterGain);
+        tracks.push(track);
+        duration = Math.max(duration, buffer.duration);
+      } catch(err){
+        console.error('decode error', f.name, err);
+      }
+    }
+    seek.max = duration;
+    renderTracks();
+    updateGains();
+    updateTimeDisplay();
+  }
+
+  function createSources(atOffset=0){
+    // stop any existing sources
+    stopSources();
+    const when = audioCtx.currentTime + 0.05; // tiny latency allow scheduling
+    tracks.forEach(t=>{
+      const src = audioCtx.createBufferSource();
+      src.buffer = t.buffer;
+      // connect
+      src.connect(t.gainNode);
+      // schedule start: start(when, offset)
+      // If atOffset > buffer duration, start with nothing (do not start)
+      if (atOffset < t.buffer.duration) {
+        src.start(when, atOffset);
+        t._source = src;
+        t._startWhen = when;
+        t._startOffset = atOffset;
+      } else {
+        t._source = null;
+      }
+    });
+    playStartedAt = when - atOffset; // audio time when position 0 aligns
+    isPlaying = true;
+    startRaf();
+  }
+
+  function stopSources(){
+    tracks.forEach(t=>{
+      if (t._source) {
+        try { t._source.stop(0); } catch(e){}
+        t._source.disconnect?.();
+        t._source = null;
+      }
+    });
+    isPlaying = false;
+    stopRaf();
+  }
+
+  function startPlayback(){
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    createSources(pausedAt);
+  }
+
+  function pausePlayback(){
+    if (!isPlaying) return;
+    // calculate current position
+    const now = audioCtx.currentTime;
+    pausedAt = now - playStartedAt;
+    stopSources();
+  }
+
+  function stopPlayback(){
+    stopSources();
+    pausedAt = 0;
+    seek.value = 0;
+    updateTimeDisplay();
+  }
+
+  // seeking: set pausedAt and if playing restart from that offset
+  seek.addEventListener('input', e=>{
+    const val = parseFloat(e.target.value);
+    pausedAt = val;
+    if (isPlaying) {
+      createSources(pausedAt);
+    } else {
+      updateTimeDisplay();
+    }
+  });
+
+  playBtn.addEventListener('click', ()=> {
+    if (!tracks.length) return alert('Load stems first.');
+    if (!isPlaying) startPlayback();
+  });
+  pauseBtn.addEventListener('click', ()=> {
+    if (isPlaying) pausePlayback();
+  });
+  stopBtn.addEventListener('click', ()=> {
+    stopPlayback();
+  });
+
+  function startRaf(){
+    if (raf) return;
+    function tick(){
+      const pos = isPlaying ? (audioCtx.currentTime - playStartedAt) : pausedAt;
+      seek.value = Math.min(pos, duration);
+      updateTimeDisplay();
+      raf = requestAnimationFrame(tick);
+    }
+    raf = requestAnimationFrame(tick);
+  }
+  function stopRaf(){
+    if (raf) cancelAnimationFrame(raf);
+    raf = null;
+  }
+
+  function updateTimeDisplay(){
+    const pos = isPlaying ? (audioCtx.currentTime - playStartedAt) : pausedAt;
+    timeDisplay.textContent = `${formatTime(pos)} / ${formatTime(duration)}`;
+  }
+
+  // keyboard shortcuts
+  window.addEventListener('keydown', e=>{
+    if (e.code === 'Space') { e.preventDefault(); if (isPlaying) pausePlayback(); else startPlayback(); }
+    if (e.code === 'KeyS' && (e.ctrlKey||e.metaKey)) { e.preventDefault(); stopPlayback(); }
+  });
+
+  // initial message if you want to provide sample stems
+  // Expose some state for debugging (optional)
+  window._multitrack = { audioCtx, tracks };
+
+})();
+</script>
+</body>
+</html>
