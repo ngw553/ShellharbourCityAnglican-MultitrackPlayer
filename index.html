@@ -333,7 +333,7 @@ function updateGains(){
   tracks.forEach(t => {
     const g = t.gainNode;
     if (!g) return;
-    const vol = (t.volume || 1);
+    const vol = t.volume;
     let target = vol;
     if (anySolo) target = t.solo ? vol : 0;
     if (t.mute) target = 0;
@@ -437,6 +437,7 @@ window.addEventListener('load', ()=>{
 </script>
 </body>
 </html>
+
 
 
 
