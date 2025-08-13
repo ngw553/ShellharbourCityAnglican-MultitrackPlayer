@@ -120,7 +120,7 @@ const SONGS = {
       { file: "Vocal.mp3", name: "Vocal" },
       // { file: "Electric Guitar.mp3", name: "Electric Guitar" },
       // { file: "BackingVocal.mp3",    name: "Backing Vocal" },
-      { file: "Click.mp3",  name: "Click" }
+      { file: "Click.mp3",  name: "Click", muted: true }
     ]
   }
 };
@@ -391,11 +391,15 @@ async function loadSong(songKey, buttonEl){
         buffer,
         gainNode: audioCtx.createGain(),
         volume: 1,
-        mute: false,
+        mute: !!stem.muted,  // <== set mute state from config
         solo: false
       };
       track.gainNode.connect(masterGain);
 
+      // Immediately mute gainNode if muted
+      if (track.mute) track.gainNode.gain.value = 0;
+      else track.gainNode.gain.value = 1;
+      
       tracks.push(track);
       maxDur = Math.max(maxDur, buffer.duration);
     } catch (err) {
@@ -433,6 +437,7 @@ window.addEventListener('load', ()=>{
 </script>
 </body>
 </html>
+
 
 
 
